@@ -2,8 +2,15 @@
 # --------------------------------------------------
 # This script takes the model we already logged to MLflow
 # (in the evaluation step) and formally registers it in the
-# MLflow Model Registry under a fixed name, with the status
-# "Staging" - meaning "this is a candidate, not live yet".
+# MLflow Model Registry under a fixed name, then assigns it
+# the "staging" alias - meaning "this is a candidate, not
+# live in production yet".
+#
+# Note: MLflow used to use fixed "stages" (Staging/Production/
+# Archived) for this, but that system is deprecated. Aliases
+# are the modern replacement - a version can have any named
+# alias, and promoting a model is just re-pointing an alias
+# to a different version.
 # --------------------------------------------------
 
 import json
@@ -31,12 +38,13 @@ def register_model(model_name, model_info):
     # if it already exists, MLflow adds a new version automatically)
     model_version = mlflow.register_model(model_uri, model_name)
 
-    # Move this specific version into the "Staging" stage
+    # Assign the "staging" alias to this version, marking it as a
+    # candidate model that still needs to pass tests before going live
     client = mlflow.tracking.MlflowClient()
-    client.transition_model_version_stage(
+    client.set_registered_model_alias(
         name=model_name,
-        version=model_version.version,
-        stage="Staging"
+        alias="staging",
+        version=model_version.version
     )
 
     return model_version
@@ -50,7 +58,7 @@ def main():
     model_name = "yt_chrome_plugin_model"
     model_version = register_model(model_name, model_info)
 
-    print(f"Model registered successfully! Name: {model_name}, Version: {model_version.version}, Stage: Staging")
+    print(f"Model registered successfully! Name: {model_name}, Version: {model_version.version}, Alias: staging")
 
 
 if __name__ == "__main__":
