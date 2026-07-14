@@ -1,18 +1,27 @@
 # src/model/model_evaluation.py
 # --------------------------------------------------
 # This script checks how well our trained model performs
-# on data it has NEVER seen before (the test set).
-# It calculates precision, recall, and f1-score for each
-# sentiment category, and saves a confusion matrix image
-# so we can visually see where the model gets confused.
+# on data it has NEVER seen before (the test set), and logs
+# everything (parameters, metrics, model, confusion matrix)
+# to MLflow so we can track and compare experiment runs.
 # --------------------------------------------------
 
 import pandas as pd
 import pickle
 import json
+import yaml
+import mlflow
+import mlflow.sklearn
 from sklearn.metrics import classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+
+def load_params(params_path):
+    # Open params.yaml and load all the settings
+    with open(params_path, "r") as file:
+        params = yaml.safe_load(file)
+    return params
 
 
 def load_data(file_path):
@@ -70,25 +79,78 @@ def save_report(report, output_path):
 
 
 def main():
-    # Step 1: Load the trained model and vectorizer
-    model = load_model("lgbm_model.pkl")
-    vectorizer = load_vectorizer("tfidf_vectorizer.pkl")
+    # Point MLflow to a local SQLite database file to store experiment metadata.
+    # This is MLflow's current recommended default (the old "file:./mlruns" style
+    # is now in maintenance mode and no longer supported by the UI/server).
+    # Later, in the AWS deployment phase, this will point to a remote server instead.
+    mlflow.set_tracking_uri("sqlite:///mlflow.db")
+    mlflow.set_experiment("dvc-pipeline-runs")
 
-    # Step 2: Load the cleaned test data
-    test_data = load_data("data/interim/test_processed.csv")
+    # Start a new MLflow run - everything inside this "with" block belongs to this run
+    with mlflow.start_run() as run:
+        # Step 1: Load settings from params.yaml and log them to MLflow
+        params = load_params("params.yaml")
+        for key, value in params.items():
+            mlflow.log_param(key, value)
 
-    # Step 3: Convert test comments into TF-IDF numbers using the SAME vectorizer
-    X_test_tfidf = vectorizer.transform(test_data["clean_comment"].values)
-    y_test = test_data["category"].values
+        # Step 2: Load the trained model and vectorizer
+        model = load_model("lgbm_model.pkl")
+        vectorizer = load_vectorizer("tfidf_vectorizer.pkl")
 
-    # Step 4: Evaluate the model
-    report, cm = evaluate_model(model, X_test_tfidf, y_test)
+        # Step 3: Load the cleaned test data
+        test_data = load_data("data/interim/test_processed.csv")
 
-    # Step 5: Save the results
-    save_report(report, "reports/metrics.json")
-    save_confusion_matrix(cm, "reports/figures/confusion_matrix.png")
+        # Step 4: Convert test comments into TF-IDF numbers using the SAME vectorizer
+        X_test_tfidf = vectorizer.transform(test_data["clean_comment"].values)
+        y_test = test_data["category"].values
 
-    print("Model evaluation complete! Check reports/metrics.json and reports/figures/confusion_matrix.png")
+        # Step 5: Evaluate the model
+        report, cm = evaluate_model(model, X_test_tfidf, y_test)
+
+        # Step 6: Save the results locally as files
+        save_report(report, "reports/metrics.json")
+        save_confusion_matrix(cm, "reports/figures/confusion_matrix.png")
+
+        # Step 7: Log precision, recall, and f1-score for each class to MLflow
+        for label, metrics in report.items():
+            if isinstance(metrics, dict):
+                mlflow.log_metric(f"test_{label}_precision", metrics["precision"])
+                mlflow.log_metric(f"test_{label}_recall", metrics["recall"])
+                mlflow.log_metric(f"test_{label}_f1_score", metrics["f1-score"])
+
+        # Step 8: Log the confusion matrix image and the vectorizer file as MLflow artifacts
+        mlflow.log_artifact("reports/figures/confusion_matrix.png")
+        mlflow.log_artifact("tfidf_vectorizer.pkl")
+
+        # Step 9: Log the trained model itself to MLflow.
+        # We explicitly mark these types as "trusted" because MLflow now uses
+        # the safer skops format (instead of raw pickle) to save models, which
+        # requires a whitelist of any non-standard types used inside the model.
+        mlflow.sklearn.log_model(
+            model,
+            name="lgbm_model",
+            skops_trusted_types=[
+                "collections.OrderedDict",
+                "lightgbm.basic.Booster",
+                "lightgbm.sklearn.LGBMClassifier"
+            ]
+        )
+
+        # Step 10: Add descriptive tags so this run is easy to identify later
+        mlflow.set_tag("model_type", "LightGBM")
+        mlflow.set_tag("task", "Sentiment Analysis")
+        mlflow.set_tag("dataset", "YouTube Comments")
+
+        # Step 11: Save this run's ID and model path - we will need this
+        # later when registering the model in the MLflow Model Registry
+        model_info = {
+            "run_id": run.info.run_id,
+            "model_path": "lgbm_model"
+        }
+        with open("experiment_info.json", "w") as file:
+            json.dump(model_info, file, indent=4)
+
+        print("Model evaluation complete! Metrics logged to MLflow, saved to reports/metrics.json")
 
 
 if __name__ == "__main__":

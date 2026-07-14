@@ -6,3 +6,4 @@ nltk
 lightgbm
 matplotlib
 seaborn
+mlflow

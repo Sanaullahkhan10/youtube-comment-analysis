@@ -5,3 +5,6 @@ data/raw/*.csv
 data/interim/*.csv
 data/processed/*.csv
 *.pkl
+mlruns/
+experiment_info.json
+mlflow.db
