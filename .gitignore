@@ -8,3 +8,4 @@ data/processed/*.csv
 mlruns/
 experiment_info.json
 mlflow.db
+*_test.png

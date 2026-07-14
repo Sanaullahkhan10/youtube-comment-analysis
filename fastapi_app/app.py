@@ -4,16 +4,28 @@
 # analysis model to the outside world (for example, to
 # a Chrome extension, or to anyone testing with Postman).
 #
-# It exposes two endpoints for now:
+# Endpoints:
 # - /predict                  : takes comments, returns sentiment
 # - /predict_with_timestamps  : same, but keeps timestamps too
+# - /generate_chart           : returns a pie chart image (PNG)
+# - /generate_wordcloud       : returns a word cloud image (PNG)
+# - /generate_trend_graph     : returns a sentiment-over-time line graph (PNG)
 # --------------------------------------------------
+
+import matplotlib
+matplotlib.use("Agg")  # Use a non-interactive backend since this runs on a server, not a desktop
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import re
+import io
 import pickle
 import mlflow
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from wordcloud import WordCloud
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 
@@ -69,8 +81,6 @@ def load_model_and_vectorizer():
     mlflow.set_tracking_uri("sqlite:///mlflow.db")
 
     # Load the model version that currently has the "staging" alias.
-    # If a new model gets promoted to this alias later, this app will
-    # automatically use the new one next time it restarts - no code change needed.
     model_uri = "models:/yt_chrome_plugin_model@staging"
     model = mlflow.pyfunc.load_model(model_uri)
 
@@ -82,7 +92,6 @@ def load_model_and_vectorizer():
 
 
 # Load the model and vectorizer ONCE, when the app starts.
-# (Loading them inside every single request would be very slow.)
 model, vectorizer = load_model_and_vectorizer()
 
 
@@ -99,19 +108,13 @@ def predict(payload: dict):
         return {"error": "No comments provided"}
 
     try:
-        # Clean every comment the same way the training data was cleaned
         preprocessed_comments = []
         for comment in comments:
             preprocessed_comments.append(preprocess_comment(comment))
 
-        # Convert the cleaned comments into TF-IDF numbers using the SAME
-        # vectorizer that was fitted during training
         transformed_comments = vectorizer.transform(preprocessed_comments).toarray()
-
-        # Ask the model to predict a sentiment for each comment
         predictions = model.predict(transformed_comments)
 
-        # Convert predictions into plain strings (so JSON can send them back)
         prediction_list = []
         for prediction in predictions:
             prediction_list.append(str(prediction))
@@ -119,7 +122,6 @@ def predict(payload: dict):
     except Exception as e:
         return {"error": f"Prediction failed: {str(e)}"}
 
-    # Build the final response: each comment paired with its predicted sentiment
     response = []
     for comment, sentiment in zip(comments, prediction_list):
         response.append({"comment": comment, "sentiment": sentiment})
@@ -135,25 +137,19 @@ def predict_with_timestamps(payload: dict):
         return {"error": "No comments provided"}
 
     try:
-        # Pull out the comment text and the timestamp from each item
         comments = []
         timestamps = []
         for item in comments_data:
             comments.append(item["text"])
             timestamps.append(item["timestamp"])
 
-        # Clean every comment the same way the training data was cleaned
         preprocessed_comments = []
         for comment in comments:
             preprocessed_comments.append(preprocess_comment(comment))
 
-        # Convert the cleaned comments into TF-IDF numbers
         transformed_comments = vectorizer.transform(preprocessed_comments).toarray()
-
-        # Ask the model to predict a sentiment for each comment
         predictions = model.predict(transformed_comments)
 
-        # Convert predictions into plain strings
         prediction_list = []
         for prediction in predictions:
             prediction_list.append(str(prediction))
@@ -161,12 +157,157 @@ def predict_with_timestamps(payload: dict):
     except Exception as e:
         return {"error": f"Prediction failed: {str(e)}"}
 
-    # Build the final response: comment + sentiment + timestamp, together
     response = []
     for comment, sentiment, timestamp in zip(comments, prediction_list, timestamps):
         response.append({"comment": comment, "sentiment": sentiment, "timestamp": timestamp})
 
     return response
+
+
+@app.post("/generate_chart")
+def generate_chart(payload: dict):
+    sentiment_counts = payload.get("sentiment_counts")
+
+    if not sentiment_counts:
+        return {"error": "No sentiment counts provided"}
+
+    try:
+        # Prepare the data for a pie chart: positive, neutral, negative counts
+        labels = ["Positive", "Neutral", "Negative"]
+        sizes = [
+            int(sentiment_counts.get("1", 0)),
+            int(sentiment_counts.get("0", 0)),
+            int(sentiment_counts.get("-1", 0))
+        ]
+
+        if sum(sizes) == 0:
+            return {"error": "Sentiment counts sum to zero"}
+
+        colors = ["#36A2EB", "#C9CBCF", "#FF6384"]  # Blue, Gray, Red
+
+        # Draw the pie chart
+        plt.figure(figsize=(6, 6))
+        plt.pie(
+            sizes,
+            labels=labels,
+            colors=colors,
+            autopct="%1.1f%%",
+            startangle=140,
+            textprops={"color": "w"}
+        )
+        plt.axis("equal")  # Keeps the pie perfectly circular, not oval
+
+        # Save the chart into memory (instead of a file on disk) and return it
+        img_io = io.BytesIO()
+        plt.savefig(img_io, format="PNG", transparent=True)
+        img_io.seek(0)
+        plt.close()
+
+        return StreamingResponse(img_io, media_type="image/png")
+
+    except Exception as e:
+        return {"error": f"Chart generation failed: {str(e)}"}
+
+
+@app.post("/generate_wordcloud")
+def generate_wordcloud(payload: dict):
+    comments = payload.get("comments")
+
+    if not comments:
+        return {"error": "No comments provided"}
+
+    try:
+        # Clean every comment first
+        preprocessed_comments = []
+        for comment in comments:
+            preprocessed_comments.append(preprocess_comment(comment))
+
+        # Combine all cleaned comments into one big block of text
+        text = " ".join(preprocessed_comments)
+
+        # Generate the word cloud image
+        wordcloud = WordCloud(
+            width=800,
+            height=400,
+            background_color="black",
+            colormap="Blues",
+            stopwords=set(stopwords.words("english")),
+            collocations=False
+        ).generate(text)
+
+        # Save the word cloud into memory and return it
+        img_io = io.BytesIO()
+        wordcloud.to_image().save(img_io, format="PNG")
+        img_io.seek(0)
+
+        return StreamingResponse(img_io, media_type="image/png")
+
+    except Exception as e:
+        return {"error": f"Word cloud generation failed: {str(e)}"}
+
+
+@app.post("/generate_trend_graph")
+def generate_trend_graph(payload: dict):
+    sentiment_data = payload.get("sentiment_data")
+
+    if not sentiment_data:
+        return {"error": "No sentiment data provided"}
+
+    try:
+        # Turn the incoming list of {timestamp, sentiment} into a table
+        df = pd.DataFrame(sentiment_data)
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df.set_index("timestamp", inplace=True)
+        df["sentiment"] = df["sentiment"].astype(int)
+
+        sentiment_labels = {-1: "Negative", 0: "Neutral", 1: "Positive"}
+
+        # Group comments by month and count how many of each sentiment there were
+        monthly_counts = df.resample("ME")["sentiment"].value_counts().unstack(fill_value=0)
+        monthly_totals = monthly_counts.sum(axis=1)
+        monthly_percentages = (monthly_counts.T / monthly_totals).T * 100
+
+        # Make sure all three sentiment columns exist, even if a category never appears
+        for sentiment_value in [-1, 0, 1]:
+            if sentiment_value not in monthly_percentages.columns:
+                monthly_percentages[sentiment_value] = 0
+
+        monthly_percentages = monthly_percentages[[-1, 0, 1]]
+
+        # Draw one line per sentiment category
+        plt.figure(figsize=(12, 6))
+        colors = {-1: "red", 0: "gray", 1: "green"}
+
+        for sentiment_value in [-1, 0, 1]:
+            plt.plot(
+                monthly_percentages.index,
+                monthly_percentages[sentiment_value],
+                marker="o",
+                linestyle="-",
+                label=sentiment_labels[sentiment_value],
+                color=colors[sentiment_value]
+            )
+
+        plt.title("Monthly Sentiment Percentage Over Time")
+        plt.xlabel("Month")
+        plt.ylabel("Percentage of Comments (%)")
+        plt.grid(True)
+        plt.xticks(rotation=45)
+        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+        plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=12))
+        plt.legend()
+        plt.tight_layout()
+
+        # Save the trend graph into memory and return it
+        img_io = io.BytesIO()
+        plt.savefig(img_io, format="PNG")
+        img_io.seek(0)
+        plt.close()
+
+        return StreamingResponse(img_io, media_type="image/png")
+
+    except Exception as e:
+        return {"error": f"Trend graph generation failed: {str(e)}"}
 
 
 if __name__ == "__main__":
