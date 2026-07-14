@@ -1,0 +1,10 @@
+venv/
+data/
+mlruns/
+mlflow.db
+.git/
+.dvc/
+__pycache__/
+notebooks/
+docs/
+reports/

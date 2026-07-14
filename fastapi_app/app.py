@@ -21,7 +21,6 @@ from fastapi.responses import StreamingResponse
 import re
 import io
 import pickle
-import mlflow
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -50,7 +49,6 @@ important_words = ["not", "but", "however", "no", "yet"]
 for word in important_words:
     stop_words.discard(word)
 
-
 def preprocess_comment(comment):
     # This is the exact same cleaning logic used in data_preprocessing.py.
     # It is critical that we clean incoming comments the SAME way we
@@ -74,31 +72,34 @@ def preprocess_comment(comment):
     cleaned_comment = " ".join(lemmatized_words)
     return cleaned_comment
 
-
 def load_model_and_vectorizer():
-    # Point MLflow to the same local database used during training
-    # (later, in the AWS phase, this will point to a remote server)
-    mlflow.set_tracking_uri("sqlite:///mlflow.db")
+    # Load the trained model and vectorizer directly from local pickle files.
+    #
+    # Note: we are NOT loading the model from the MLflow registry here.
+    # MLflow's local (file-based) artifact storage bakes in an ABSOLUTE
+    # file path tied to this specific computer (e.g. C:\PROJECTS\...).
+    # That path does not exist inside a Docker container, which has its
+    # own separate filesystem - so registry loading would break as soon
+    # as this app runs inside a container.
+    #
+    # Once we have a remote MLflow server running on AWS (a later step),
+    # we will switch back to loading via the registry, because a network
+    # URL (like http://our-server:5000) works identically everywhere,
+    # unlike a local file path.
+    with open("lgbm_model.pkl", "rb") as file:
+        model = pickle.load(file)
 
-    # Load the model version that currently has the "staging" alias.
-    model_uri = "models:/yt_chrome_plugin_model@staging"
-    model = mlflow.pyfunc.load_model(model_uri)
-
-    # Load the TF-IDF vectorizer from the local pickle file
     with open("tfidf_vectorizer.pkl", "rb") as file:
         vectorizer = pickle.load(file)
 
     return model, vectorizer
 
-
 # Load the model and vectorizer ONCE, when the app starts.
 model, vectorizer = load_model_and_vectorizer()
-
 
 @app.get("/")
 def home():
     return "Welcome to the YouTube comment sentiment analysis API"
-
 
 @app.post("/predict")
 def predict(payload: dict):
@@ -127,7 +128,6 @@ def predict(payload: dict):
         response.append({"comment": comment, "sentiment": sentiment})
 
     return response
-
 
 @app.post("/predict_with_timestamps")
 def predict_with_timestamps(payload: dict):
@@ -163,7 +163,6 @@ def predict_with_timestamps(payload: dict):
 
     return response
 
-
 @app.post("/generate_chart")
 def generate_chart(payload: dict):
     sentiment_counts = payload.get("sentiment_counts")
@@ -172,7 +171,6 @@ def generate_chart(payload: dict):
         return {"error": "No sentiment counts provided"}
 
     try:
-        # Prepare the data for a pie chart: positive, neutral, negative counts
         labels = ["Positive", "Neutral", "Negative"]
         sizes = [
             int(sentiment_counts.get("1", 0)),
@@ -183,9 +181,8 @@ def generate_chart(payload: dict):
         if sum(sizes) == 0:
             return {"error": "Sentiment counts sum to zero"}
 
-        colors = ["#36A2EB", "#C9CBCF", "#FF6384"]  # Blue, Gray, Red
+        colors = ["#36A2EB", "#C9CBCF", "#FF6384"]
 
-        # Draw the pie chart
         plt.figure(figsize=(6, 6))
         plt.pie(
             sizes,
@@ -195,9 +192,8 @@ def generate_chart(payload: dict):
             startangle=140,
             textprops={"color": "w"}
         )
-        plt.axis("equal")  # Keeps the pie perfectly circular, not oval
+        plt.axis("equal")
 
-        # Save the chart into memory (instead of a file on disk) and return it
         img_io = io.BytesIO()
         plt.savefig(img_io, format="PNG", transparent=True)
         img_io.seek(0)
@@ -208,7 +204,6 @@ def generate_chart(payload: dict):
     except Exception as e:
         return {"error": f"Chart generation failed: {str(e)}"}
 
-
 @app.post("/generate_wordcloud")
 def generate_wordcloud(payload: dict):
     comments = payload.get("comments")
@@ -217,15 +212,12 @@ def generate_wordcloud(payload: dict):
         return {"error": "No comments provided"}
 
     try:
-        # Clean every comment first
         preprocessed_comments = []
         for comment in comments:
             preprocessed_comments.append(preprocess_comment(comment))
 
-        # Combine all cleaned comments into one big block of text
         text = " ".join(preprocessed_comments)
 
-        # Generate the word cloud image
         wordcloud = WordCloud(
             width=800,
             height=400,
@@ -235,7 +227,6 @@ def generate_wordcloud(payload: dict):
             collocations=False
         ).generate(text)
 
-        # Save the word cloud into memory and return it
         img_io = io.BytesIO()
         wordcloud.to_image().save(img_io, format="PNG")
         img_io.seek(0)
@@ -245,7 +236,6 @@ def generate_wordcloud(payload: dict):
     except Exception as e:
         return {"error": f"Word cloud generation failed: {str(e)}"}
 
-
 @app.post("/generate_trend_graph")
 def generate_trend_graph(payload: dict):
     sentiment_data = payload.get("sentiment_data")
@@ -254,7 +244,6 @@ def generate_trend_graph(payload: dict):
         return {"error": "No sentiment data provided"}
 
     try:
-        # Turn the incoming list of {timestamp, sentiment} into a table
         df = pd.DataFrame(sentiment_data)
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df.set_index("timestamp", inplace=True)
@@ -262,19 +251,16 @@ def generate_trend_graph(payload: dict):
 
         sentiment_labels = {-1: "Negative", 0: "Neutral", 1: "Positive"}
 
-        # Group comments by month and count how many of each sentiment there were
         monthly_counts = df.resample("ME")["sentiment"].value_counts().unstack(fill_value=0)
         monthly_totals = monthly_counts.sum(axis=1)
         monthly_percentages = (monthly_counts.T / monthly_totals).T * 100
 
-        # Make sure all three sentiment columns exist, even if a category never appears
         for sentiment_value in [-1, 0, 1]:
             if sentiment_value not in monthly_percentages.columns:
                 monthly_percentages[sentiment_value] = 0
 
         monthly_percentages = monthly_percentages[[-1, 0, 1]]
 
-        # Draw one line per sentiment category
         plt.figure(figsize=(12, 6))
         colors = {-1: "red", 0: "gray", 1: "green"}
 
@@ -298,7 +284,6 @@ def generate_trend_graph(payload: dict):
         plt.legend()
         plt.tight_layout()
 
-        # Save the trend graph into memory and return it
         img_io = io.BytesIO()
         plt.savefig(img_io, format="PNG")
         img_io.seek(0)
@@ -309,7 +294,6 @@ def generate_trend_graph(payload: dict):
     except Exception as e:
         return {"error": f"Trend graph generation failed: {str(e)}"}
 
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=5000)
+    uvicorn.run(app, host="0.0.0.0", port=5000)

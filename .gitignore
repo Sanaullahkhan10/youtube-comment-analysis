@@ -9,3 +9,6 @@ mlruns/
 experiment_info.json
 mlflow.db
 *_test.png
+chart_test.png
+wordcloud_test.png
+trend_test.png
