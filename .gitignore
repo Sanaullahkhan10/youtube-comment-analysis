@@ -12,3 +12,4 @@ mlflow.db
 chart_test.png
 wordcloud_test.png
 trend_test.png
+*.pem

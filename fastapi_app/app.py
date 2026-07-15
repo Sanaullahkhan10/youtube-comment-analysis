@@ -4,6 +4,13 @@
 # analysis model to the outside world (for example, to
 # a Chrome extension, or to anyone testing with Postman).
 #
+# Note: The model and vectorizer are loaded directly from
+# local pickle files (baked into the Docker image), NOT from
+# the MLflow registry. This keeps the serving container fully
+# self-contained and portable - it does not depend on a local
+# MLflow tracking store, whose file paths would not resolve
+# correctly inside a Linux container anyway.
+#
 # Endpoints:
 # - /predict                  : takes comments, returns sentiment
 # - /predict_with_timestamps  : same, but keeps timestamps too
@@ -49,10 +56,9 @@ important_words = ["not", "but", "however", "no", "yet"]
 for word in important_words:
     stop_words.discard(word)
 
+
 def preprocess_comment(comment):
     # This is the exact same cleaning logic used in data_preprocessing.py.
-    # It is critical that we clean incoming comments the SAME way we
-    # cleaned the training data, otherwise the model will get confused.
     comment = comment.lower()
     comment = comment.strip()
     comment = re.sub(r"\n", " ", comment)
@@ -72,34 +78,28 @@ def preprocess_comment(comment):
     cleaned_comment = " ".join(lemmatized_words)
     return cleaned_comment
 
+
 def load_model_and_vectorizer():
-    # Load the trained model and vectorizer directly from local pickle files.
-    #
-    # Note: we are NOT loading the model from the MLflow registry here.
-    # MLflow's local (file-based) artifact storage bakes in an ABSOLUTE
-    # file path tied to this specific computer (e.g. C:\PROJECTS\...).
-    # That path does not exist inside a Docker container, which has its
-    # own separate filesystem - so registry loading would break as soon
-    # as this app runs inside a container.
-    #
-    # Once we have a remote MLflow server running on AWS (a later step),
-    # we will switch back to loading via the registry, because a network
-    # URL (like http://our-server:5000) works identically everywhere,
-    # unlike a local file path.
+    # Load the trained model directly from its pickle file.
+    # This file is baked into the Docker image at build time.
     with open("lgbm_model.pkl", "rb") as file:
         model = pickle.load(file)
 
+    # Load the TF-IDF vectorizer the same way
     with open("tfidf_vectorizer.pkl", "rb") as file:
         vectorizer = pickle.load(file)
 
     return model, vectorizer
 
+
 # Load the model and vectorizer ONCE, when the app starts.
 model, vectorizer = load_model_and_vectorizer()
+
 
 @app.get("/")
 def home():
     return "Welcome to the YouTube comment sentiment analysis API"
+
 
 @app.post("/predict")
 def predict(payload: dict):
@@ -128,6 +128,7 @@ def predict(payload: dict):
         response.append({"comment": comment, "sentiment": sentiment})
 
     return response
+
 
 @app.post("/predict_with_timestamps")
 def predict_with_timestamps(payload: dict):
@@ -162,6 +163,7 @@ def predict_with_timestamps(payload: dict):
         response.append({"comment": comment, "sentiment": sentiment, "timestamp": timestamp})
 
     return response
+
 
 @app.post("/generate_chart")
 def generate_chart(payload: dict):
@@ -204,6 +206,7 @@ def generate_chart(payload: dict):
     except Exception as e:
         return {"error": f"Chart generation failed: {str(e)}"}
 
+
 @app.post("/generate_wordcloud")
 def generate_wordcloud(payload: dict):
     comments = payload.get("comments")
@@ -235,6 +238,7 @@ def generate_wordcloud(payload: dict):
 
     except Exception as e:
         return {"error": f"Word cloud generation failed: {str(e)}"}
+
 
 @app.post("/generate_trend_graph")
 def generate_trend_graph(payload: dict):
@@ -294,6 +298,9 @@ def generate_trend_graph(payload: dict):
     except Exception as e:
         return {"error": f"Trend graph generation failed: {str(e)}"}
 
+
 if __name__ == "__main__":
     import uvicorn
+    # Bind to 0.0.0.0 (not 127.0.0.1) so the server is reachable from
+    # outside the container once Docker maps a port to it.
     uvicorn.run(app, host="0.0.0.0", port=5000)
