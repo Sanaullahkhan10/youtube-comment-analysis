@@ -1,0 +1,14 @@
+version: 0.0
+os: linux
+files:
+  - source: /
+    destination: /home/ec2-user/app
+hooks:
+  ApplicationStop:
+    - location: deploy/scripts/stop_container.sh
+      timeout: 300
+      runas: ec2-user
+  ApplicationStart:
+    - location: deploy/scripts/start_container.sh
+      timeout: 300
+      runas: ec2-user
