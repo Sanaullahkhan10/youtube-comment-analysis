@@ -10,3 +10,4 @@ mlflow
 fastapi
 uvicorn
 wordcloud
+dvc[s3]
