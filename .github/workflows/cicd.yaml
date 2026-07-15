@@ -1,0 +1,124 @@
+name: CICD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Get the latest code from the repository
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Install the same Python version used locally and in
+      # Docker, so package behavior (like scikit-learn) matches exactly
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Step 3: Speed up future runs by caching pip's download cache
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Step 4: Install all Python packages needed for the pipeline
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Step 5: Run the full ML pipeline (data ingestion through model
+      # registration) using DVC, so every push retrains and validates
+      # the model from scratch
+      - name: Run DVC pipeline
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+        run: dvc repro
+
+      # Step 6: Push any new/updated data and model artifacts to the
+      # S3 remote so they are backed up outside of Git
+      - name: Push DVC-tracked files to S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+        run: dvc push
+
+      # Step 7: Run our three unit tests - if any of these fail, the
+      # workflow stops here and nothing gets deployed
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Run model loading test
+        run: pytest scripts/test_load_model.py -v
+
+      - name: Run model signature test
+        run: pytest scripts/test_model_signature.py -v
+
+      - name: Run model performance test
+        run: pytest scripts/test_model_performance.py -v
+
+      # Step 8: All tests passed - promote this model version from
+      # "staging" to "production" in the MLflow registry
+      - name: Promote model to production
+        run: python scripts/promote_model.py
+
+      # Step 9: Log in to our private ECR repository so we can push
+      # a Docker image to it
+      - name: Log in to Amazon ECR
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+
+      # Step 10: Build the Docker image using the Dockerfile in this repo
+      - name: Build Docker image
+        run: docker build -t ${{ secrets.ECR_REPOSITORY }} .
+
+      # Step 11: Tag the image with the ECR repository's full address
+      - name: Tag Docker image
+        run: docker tag ${{ secrets.ECR_REPOSITORY }}:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:latest
+
+      # Step 12: Push the image to ECR, so EC2 can pull it later
+      - name: Push Docker image to ECR
+        run: docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY }}:latest
+
+      # Step 13: Package the deployment instructions (appspec.yml and
+      # the deploy scripts) into a zip file, which CodeDeploy requires
+      - name: Zip deployment files
+        run: zip -r deployment.zip appspec.yml deploy/scripts/stop_container.sh deploy/scripts/start_container.sh
+
+      # Step 14: Upload the zip to S3, so CodeDeploy can fetch it from there.
+      # We reuse the same DVC bucket, just under a different folder/key.
+      - name: Upload deployment zip to S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+        run: aws s3 cp deployment.zip s3://yt-sentiment-dvc-739022091079/deployments/deployment.zip
+
+      # Step 15: Tell CodeDeploy to deploy this zip to our EC2 instance.
+      # CodeDeploy will run stop_container.sh, copy the new files, then
+      # run start_container.sh (which pulls and runs the new image).
+      - name: Deploy to AWS CodeDeploy
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          aws deploy create-deployment \
+            --application-name yt-sentiment-app \
+            --deployment-group-name yt-sentiment-deployment-group \
+            --deployment-config-name CodeDeployDefault.OneAtATime \
+            --s3-location bucket=yt-sentiment-dvc-739022091079,key=deployments/deployment.zip,bundleType=zip \
+            --file-exists-behavior OVERWRITE \
+            --region ${{ secrets.AWS_REGION }}
