@@ -1,19 +1,21 @@
 // popup.js
 // --------------------------------------------------
 // This script runs when the extension popup opens.
-// It does 4 things:
+// It does 5 things:
 // 1. Finds the YouTube video ID from the current tab URL
 // 2. Fetches comments for that video from the YouTube Data API
 // 3. Sends those comments to our sentiment analysis API
 // 4. Displays each comment along with its predicted sentiment
+// 5. Fetches and displays a pie chart, word cloud, and trend graph
 //
 // Note: YOUTUBE_API_KEY and SENTIMENT_API_BASE_URL come from
 // config.js, which is loaded before this file (see popup.html).
 // --------------------------------------------------
 
-// Get references to the status and results boxes in popup.html
+// Get references to the boxes in popup.html
 var statusBox = document.getElementById("status");
 var resultsBox = document.getElementById("results");
+var visualsBox = document.getElementById("visuals");
 
 // This function fetches comments for a given YouTube video ID.
 // It returns a list of {text, timestamp} objects.
@@ -62,7 +64,24 @@ async function analyzeSentiment(comments) {
   return results;
 }
 
-// This function displays the results inside the popup.
+// This is a generic helper that POSTs a JSON payload to one of our
+// image-generating endpoints, and turns the returned PNG bytes into
+// a URL the browser can use as an <img> source.
+async function fetchImageFromApi(endpointPath, payload) {
+  var url = SENTIMENT_API_BASE_URL + endpointPath;
+
+  var response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  var imageBlob = await response.blob();
+  var imageUrl = URL.createObjectURL(imageBlob);
+  return imageUrl;
+}
+
+// This function displays the text results inside the popup.
 function displayResults(results) {
   resultsBox.innerHTML = "";
 
@@ -124,6 +143,70 @@ function displayResults(results) {
     commentElement.appendChild(sentimentTag);
     resultsBox.appendChild(commentElement);
   }
+
+  // Return the counts so the caller can reuse them for the pie chart
+  return {
+    positiveCount: positiveCount,
+    neutralCount: neutralCount,
+    negativeCount: negativeCount
+  };
+}
+
+// This function fetches all three visualizations and adds them to the popup.
+async function displayVisuals(rawComments, results, sentimentCounts) {
+  visualsBox.innerHTML = "";
+
+  // --- Pie chart ---
+  var chartHeading = document.createElement("h3");
+  chartHeading.textContent = "Sentiment Breakdown";
+  visualsBox.appendChild(chartHeading);
+
+  var chartPayload = {
+    sentiment_counts: {
+      "1": sentimentCounts.positiveCount,
+      "0": sentimentCounts.neutralCount,
+      "-1": sentimentCounts.negativeCount
+    }
+  };
+  var chartUrl = await fetchImageFromApi("/generate_chart", chartPayload);
+  var chartImage = document.createElement("img");
+  chartImage.src = chartUrl;
+  visualsBox.appendChild(chartImage);
+
+  // --- Word cloud ---
+  var wordcloudHeading = document.createElement("h3");
+  wordcloudHeading.textContent = "Word Cloud";
+  visualsBox.appendChild(wordcloudHeading);
+
+  // Build a plain list of comment text strings (word cloud does not need timestamps)
+  var commentTexts = [];
+  for (var i = 0; i < rawComments.length; i++) {
+    commentTexts.push(rawComments[i].text);
+  }
+
+  var wordcloudUrl = await fetchImageFromApi("/generate_wordcloud", { comments: commentTexts });
+  var wordcloudImage = document.createElement("img");
+  wordcloudImage.src = wordcloudUrl;
+  visualsBox.appendChild(wordcloudImage);
+
+  // --- Trend graph ---
+  var trendHeading = document.createElement("h3");
+  trendHeading.textContent = "Sentiment Trend Over Time";
+  visualsBox.appendChild(trendHeading);
+
+  // Build the {timestamp, sentiment} list, converting sentiment strings to numbers
+  var sentimentData = [];
+  for (var i = 0; i < results.length; i++) {
+    sentimentData.push({
+      timestamp: results[i].timestamp,
+      sentiment: parseInt(results[i].sentiment, 10)
+    });
+  }
+
+  var trendUrl = await fetchImageFromApi("/generate_trend_graph", { sentiment_data: sentimentData });
+  var trendImage = document.createElement("img");
+  trendImage.src = trendUrl;
+  visualsBox.appendChild(trendImage);
 }
 
 // Main logic - runs as soon as the popup opens
@@ -166,9 +249,14 @@ async function main() {
     // Step 5: Send comments to our sentiment API
     var results = await analyzeSentiment(comments);
 
-    // Step 6: Show the results
+    // Step 6: Show the text results, and get back the sentiment counts
     statusBox.textContent = "Analysis complete for video: " + videoId;
-    displayResults(results);
+    var sentimentCounts = displayResults(results);
+
+    // Step 7: Fetch and show the pie chart, word cloud, and trend graph
+    statusBox.textContent = "Generating visuals...";
+    await displayVisuals(comments, results, sentimentCounts);
+    statusBox.textContent = "Analysis complete for video: " + videoId;
 
   } catch (error) {
     statusBox.textContent = "Error: " + error.message;

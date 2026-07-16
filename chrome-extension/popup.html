@@ -13,14 +13,25 @@
       font-size: 16px;
       margin-bottom: 8px;
     }
+    h3 {
+      font-size: 13px;
+      margin-top: 14px;
+      margin-bottom: 4px;
+    }
     #status {
       font-size: 13px;
       color: #333;
       margin-bottom: 8px;
     }
     #results {
-      max-height: 350px;
+      max-height: 250px;
       overflow-y: auto;
+    }
+    #visuals img {
+      max-width: 100%;
+      display: block;
+      margin-bottom: 8px;
+      border: 1px solid #ddd;
     }
   </style>
 </head>
@@ -28,6 +39,7 @@
   <h2>YouTube Comment Sentiment</h2>
   <div id="status">Checking current tab...</div>
   <div id="results"></div>
+  <div id="visuals"></div>
 
   <script src="config.js"></script>
   <script src="popup.js"></script>
