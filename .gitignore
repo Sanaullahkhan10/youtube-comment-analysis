@@ -13,3 +13,4 @@ chart_test.png
 wordcloud_test.png
 trend_test.png
 *.pem
+chrome-extension/config.js

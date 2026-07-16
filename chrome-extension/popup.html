@@ -5,7 +5,7 @@
   <title>Comment Sentiment Analysis</title>
   <style>
     body {
-      width: 320px;
+      width: 380px;
       padding: 12px;
       font-family: Arial, sans-serif;
     }
@@ -16,13 +16,20 @@
     #status {
       font-size: 13px;
       color: #333;
+      margin-bottom: 8px;
+    }
+    #results {
+      max-height: 350px;
+      overflow-y: auto;
     }
   </style>
 </head>
 <body>
   <h2>YouTube Comment Sentiment</h2>
   <div id="status">Checking current tab...</div>
+  <div id="results"></div>
 
+  <script src="config.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
