@@ -15,5 +15,12 @@ cd /home/ec2-user
 wget https://aws-codedeploy-ap-south-1.s3.ap-south-1.amazonaws.com/latest/install
 chmod +x ./install
 ./install auto
+
+# Enable the agent so it survives reboots. On this AMI, "systemctl enable"
+# alone does not work reliably because systemd-sysv-install is missing,
+# so we create the multi-user.target symlink manually instead.
+ln -sf /usr/lib/systemd/system/codedeploy-agent.service /etc/systemd/system/multi-user.target.wants/codedeploy-agent.service
+systemctl daemon-reload
+
 systemctl start codedeploy-agent
 systemctl enable codedeploy-agent
